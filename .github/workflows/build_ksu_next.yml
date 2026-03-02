@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: LineageOS/android_kernel_google_msm-4.19
+          repository: LineageOS/android_kernel_google_redbull
           ref: lineage-23.2 # 23相当の最新ブランチを指定
           path: kernel
 
