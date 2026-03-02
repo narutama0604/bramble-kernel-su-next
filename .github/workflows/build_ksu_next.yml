@@ -11,41 +11,47 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: LineageOS/android_kernel_google_redbull
-          ref: lineage-22.1 # 使用するブランチ名に合わせて変更してください
+          ref: lineage-23.2 # ここを実際のリポジトリのブランチ名に合わせてください
           path: kernel
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
-            libncurses-dev libncurses5 binutils-aarch64-linux-gnu \
-            git curl wget tar zip lz4 cpio
+            libncurses-dev git curl wget tar zip lz4 cpio python3
 
       - name: Set up Toolchains
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
+          # AOSP Clang
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang
+          # AOSP GCC (4.19カーネルのビルドには依然としてlibgccなどのために必要です)
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 aarch64-gcc
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 arm-gcc
 
       - name: Integrate KernelSU Next
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # KernelSU Nextのセットアップ実行
+          # KernelSU Nextのセットアップ
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -
           
-          # 非GKI (4.19) で必須となるkprobesのシンボルエクスポート修正
-          echo "EXPORT_SYMBOL_GPL(kprobe_on_func_entry);" >> kernel/kprobes.c
+          # 4.19カーネル用のkprobesパッチ（これがないとKSUが動作しません）
+          if [ -f kernel/kprobes.c ]; then
+            echo "EXPORT_SYMBOL_GPL(kprobe_on_func_entry);" >> kernel/kprobes.c
+          fi
 
       - name: Build Kernel
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          export PATH=$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/aarch64-gcc/bin:$GITHUB_WORKSPACE/toolchain/arm-gcc/bin:$PATH
           
-          # redbull共通のdefconfigを使用
-          DEFCONFIG="vendor/redbull_defconfig"
+          # ツールチェーンへのパス設定
+          CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
+          GCC64_PATH=$GITHUB_WORKSPACE/toolchain/aarch64-gcc/bin
+          GCC32_PATH=$GITHUB_WORKSPACE/toolchain/arm-gcc/bin
+          export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
           
+          # ビルド引数の定義
           MAKE_ARGS="
             ARCH=arm64 \
             CC=clang \
@@ -56,16 +62,26 @@ jobs:
             LLVM_IAS=1
           "
           
-          make $MAKE_ARGS $DEFCONFIG
+          # 1. Configの生成
+          make $MAKE_ARGS vendor/redbull_defconfig
           
-          # KernelSU Next用のConfig有効化
+          # 2. KernelSU Next用のフラグを強制有効化
           ./scripts/config --enable CONFIG_KPROBES
           ./scripts/config --enable CONFIG_HAVE_KPROBES
           ./scripts/config --enable CONFIG_KPROBE_EVENTS
           ./scripts/config --enable CONFIG_OVERLAY_FS
           
-          # ビルド実行
+          # 3. ビルド実行
           make -j$(nproc) $MAKE_ARGS
+
+      - name: Check Output
+        run: |
+          if [ -f kernel/arch/arm64/boot/Image.lz4 ]; then
+            echo "Build Success!"
+          else
+            echo "Build Failed: Image.lz4 not found."
+            exit 1
+          fi
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
