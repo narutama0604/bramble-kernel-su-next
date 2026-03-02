@@ -11,32 +11,41 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: LineageOS/android_kernel_google_redbull
-          ref: lineage-23.2 # ここを実際のリポジトリのブランチ名に合わせてください
+          ref: lineage-23.2 # あなたが使用したいブランチ名に書き換えてください
           path: kernel
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
-            libncurses-dev git curl wget tar zip lz4 cpio python3
+            libncurses-dev git curl wget tar zip lz4 cpio python3 python-is-python3
 
       - name: Set up Toolchains
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
-          # AOSP Clang
+          # AOSP Clang (最新のバイナリを取得)
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang
-          # AOSP GCC (4.19カーネルのビルドには依然としてlibgccなどのために必要です)
+          # AOSP GCC (4.19のビルド補助に必要)
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 aarch64-gcc
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 arm-gcc
 
-      - name: Integrate KernelSU Next
+      - name: Integrate KernelSU Next (Manual)
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # KernelSU Nextのセットアップ
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -
+          # 404エラー回避のため、スクリプトではなく直接クローンして統合
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next KernelSU-Next
+          cp -r KernelSU-Next/kernel drivers/kernelsu
           
-          # 4.19カーネル用のkprobesパッチ（これがないとKSUが動作しません）
+          # Kconfig と Makefile に追加
+          if ! grep -q "kernelsu" drivers/Kconfig; then
+            sed -i 's/endmenu/source "drivers\/kernelsu\/Kconfig"\nendmenu/' drivers/Kconfig
+          fi
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-y += kernelsu/' >> drivers/Makefile
+          fi
+
+          # Non-GKI (4.19) 用の kprobes パッチ
           if [ -f kernel/kprobes.c ]; then
             echo "EXPORT_SYMBOL_GPL(kprobe_on_func_entry);" >> kernel/kprobes.c
           fi
@@ -45,13 +54,13 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel
           
-          # ツールチェーンへのパス設定
-          CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
+          # Clang の実行パスを動的に取得 (フォルダ階層が深いため)
+          CLANG_BIN=$(find $GITHUB_WORKSPACE/toolchain/clang -name "clang" -type f | head -n 1 | xargs dirname)
           GCC64_PATH=$GITHUB_WORKSPACE/toolchain/aarch64-gcc/bin
           GCC32_PATH=$GITHUB_WORKSPACE/toolchain/arm-gcc/bin
-          export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
+          export PATH=$CLANG_BIN:$GCC64_PATH:$GCC32_PATH:$PATH
           
-          # ビルド引数の定義
+          # ビルド引数
           MAKE_ARGS="
             ARCH=arm64 \
             CC=clang \
@@ -62,10 +71,10 @@ jobs:
             LLVM_IAS=1
           "
           
-          # 1. Configの生成
+          # 1. Defconfig 適用
           make $MAKE_ARGS vendor/redbull_defconfig
           
-          # 2. KernelSU Next用のフラグを強制有効化
+          # 2. KernelSU Next 用の設定を有効化
           ./scripts/config --enable CONFIG_KPROBES
           ./scripts/config --enable CONFIG_HAVE_KPROBES
           ./scripts/config --enable CONFIG_KPROBE_EVENTS
@@ -80,11 +89,12 @@ jobs:
             echo "Build Success!"
           else
             echo "Build Failed: Image.lz4 not found."
+            ls -R kernel/arch/arm64/boot/
             exit 1
           fi
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Image.lz4-bramble
+          name: KernelSU-Next-Bramble
           path: kernel/arch/arm64/boot/Image.lz4
